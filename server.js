@@ -26,7 +26,7 @@ admin.initializeApp({
 });
 
 const corsOptions = {
-  origin:process.env.FRONT_END_UR,
+  origin:process.env.FRONT_END_URL,
   methods: ["GET", "POST", "PUT", "DELETE"],
   credentials: true,
   allowedHeaders: ["Content-Type", "Authorization"],
