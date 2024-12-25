@@ -2,10 +2,12 @@ const Roadmap = require("../models/RoadMapSchema");
 const User = require("../models/UserSchema");
 
 const createRoadmap = async (req, res) => {
+  console.log("roadmap creation data",req.body);
   const { name, topics, userId } = req.body;
 
   try {
     const user = await User.findOne({ firebaseUID: userId });
+    console.log(user);
 
     const idUser = user._id;
 
