@@ -35,30 +35,40 @@ async function handleStatusChange(roadmapId) {
   try {
     const roadmap = await Roadmap.findById(roadmapId);
     if (!roadmap) {
-      console.log("Roadmap Not found", roadmap);
+      console.log("Roadmap not found", roadmapId);
+      return;
     }
-    roadmap.topics.forEach((topic) => {
-      let isAnySubtopicInProgress = false;
-      let areAllSubtopicCompleted = true;
 
-      topic.subtopics.forEach((subtopic) => {
-        if (subtopic.status === "in progress") {
-          isAnySubtopicInProgress = true;
-        }
-        if (subtopic.status !== "completed") {
-          areAllSubtopicCompleted = false;
-        }
-      });
-      if (isAnySubtopicInProgress) {
-        topic.status = "in progress";
-      } else if (areAllSubtopicCompleted) {
-        topic.status = "completed";
+    let isUpdated = false;
+
+    roadmap.topics.forEach((topic) => {
+      const allCompleted = topic.subtopics.every(
+        (subtopic) => subtopic.status === "completed"
+      );
+      const allNotStarted = topic.subtopics.every(
+        (subtopic) => subtopic.status === "not started"
+      );
+
+      let newStatus;
+      if (allCompleted) {
+        newStatus = "completed";
+      } else if (allNotStarted) {
+        newStatus = "not started";
       } else {
-        topic.status = "not started";
+        newStatus = "in progress";
+      }
+
+      if (topic.status !== newStatus) {
+        topic.status = newStatus;
+        isUpdated = true;
       }
     });
-    await roadmap.save();
-    console.log("Updated topic statuses in roadmap:", roadmapId);
+    if (isUpdated) {
+      await roadmap.save();
+      console.log("Updated topic statuses in roadmap:", roadmapId);
+    } else {
+      console.log("No changes detected. Skipping update.");
+    }
   } catch (error) {
     console.error("Error handling status change: ", error);
   }
