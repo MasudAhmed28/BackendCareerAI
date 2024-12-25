@@ -3,6 +3,7 @@ const User = require("../models/UserSchema");
 
 const CreateUser = async (req, res) => {
   try {
+    const { firebaseUID, name, email } = req.body;
     const user = await User.findOneAndUpdate(
       { firebaseUID },
       { $setOnInsert: { firebaseUID, name, email } },
