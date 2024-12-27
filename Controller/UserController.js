@@ -4,20 +4,19 @@ const User = require("../models/UserSchema");
 const CreateUser = async (req, res) => {
   try {
     const { firebaseUID, name, email } = req.body;
-    const user = await User.findOneAndUpdate(
-      { firebaseUID },
-      { $setOnInsert: { firebaseUID, name, email } },
-      { new: true, upsert: true }
-    );
 
-    if (user) {
+    const existingUser = await User.findOne({ firebaseUID });
+    if (existingUser) {
       return res.status(200).json({
-        message: user.firebaseUID
-          ? "User already exists"
-          : "User created successfully",
-        data: user,
+        message: "User already exists",
+        data: existingUser,
       });
     }
+    const newUser = await User.create({ firebaseUID, name, email });
+    return res.status(201).json({
+      message: "User created successfully",
+      data: newUser,
+    });
   } catch (error) {
     console.error("Error creating user:", error);
     return res
@@ -25,7 +24,6 @@ const CreateUser = async (req, res) => {
       .json({ message: "An error occurred while creating the user" });
   }
 };
-
 const getUser = async (req, res) => {
   const userid = req.user.user_id;
   try {
