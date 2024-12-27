@@ -39,7 +39,7 @@ app.use(express.json());
 
 // Database connection
 connectDB();
-console.log("Hi"):
+console.log("Hi");
 
 // Routes
 app.use("/auth", router);
