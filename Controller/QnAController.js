@@ -2,13 +2,22 @@ const { Question, Reply } = require("../models/QnASchema");
 const redisClient = require("../RedisClient");
 const admin = require("firebase-admin");
 
+// Helper function to fetch user info with caching
 const getUserInfo = async (firebaseUID) => {
+  const cacheKey = `user:${firebaseUID}`;
+  const cachedUser = await redisClient.get(cacheKey);
+  if (cachedUser) return JSON.parse(cachedUser);
+
   try {
     const userRecord = await admin.auth().getUser(firebaseUID);
-    return {
+    const userInfo = {
       name: userRecord.displayName || "Anonymous",
       photo: userRecord.photoURL || "/default-avatar.png",
     };
+
+    // Cache the user info for 1 hour
+    await redisClient.setEx(cacheKey, 3600, JSON.stringify(userInfo));
+    return userInfo;
   } catch (error) {
     console.error(`Error fetching user info for UID: ${firebaseUID}`, error);
     return {
@@ -18,16 +27,30 @@ const getUserInfo = async (firebaseUID) => {
   }
 };
 
+// Invalidate all questions cache
+const invalidateQuestionsCache = async () => {
+  const keys = await redisClient.keys("questions:page=*");
+  if (keys.length) {
+    await redisClient.del(...keys);
+  }
+};
+
+const invalidateRepliesForQuestion = async (questionId) => {
+  const keys = await redisClient.keys(`replies:questionId=${questionId}:*`);
+  if (keys.length) {
+    await redisClient.del(...keys);
+  }
+};
+
 const createQuestion = async (req, res) => {
   try {
     const question = new Question(req.body);
     await question.save();
-    await redisClient.del("questions");
 
-    // Fetch user info
+    // Invalidate cache
+    await invalidateQuestionsCache();
+
     const userInfo = await getUserInfo(req.body.userId);
-
-    // Return the question with userInfo
     res.status(201).json({ ...question.toObject(), userInfo });
   } catch (error) {
     console.error(error);
@@ -35,10 +58,17 @@ const createQuestion = async (req, res) => {
   }
 };
 
+// Get paginated questions with caching
 const getQuestions = async (req, res) => {
-  const { page = 1, limit = 10 } = req.query;
+  const { page = 1, limit = 10, userId } = req.query;
+  const redisKey = `questions:page=${page}:limit=${limit}`;
 
   try {
+    const cachedQuestions = await redisClient.get(redisKey);
+    if (cachedQuestions) {
+      return res.json(JSON.parse(cachedQuestions));
+    }
+
     const questions = await Question.find()
       .sort({ timeStamp: -1 })
       .skip((page - 1) * limit)
@@ -50,16 +80,13 @@ const getQuestions = async (req, res) => {
         return {
           ...question.toObject(),
           userInfo,
+          isLiked: question.likedBy.includes(userId),
         };
       })
     );
 
-    await redisClient.setEx(
-      "questions",
-      3600,
-      JSON.stringify(enrichedQuestions)
-    );
-
+    // Cache the questions
+    await redisClient.setEx(redisKey, 3600, JSON.stringify(enrichedQuestions));
     res.json(enrichedQuestions);
   } catch (error) {
     console.error(error);
@@ -67,25 +94,22 @@ const getQuestions = async (req, res) => {
   }
 };
 
+// Create a reply
 const createReply = async (req, res) => {
-  console.log(req.body, req.params.id);
   try {
-    const reply = new Reply({
-      ...req.body,
-      questionId: req.params.id,
-      userId: req.body.userId,
-    });
+    const reply = new Reply({ ...req.body, questionId: req.params.id });
     await reply.save();
 
+    // Increment reply count in the question
     await Question.findByIdAndUpdate(req.params.id, {
       $inc: { replyCount: 1 },
     });
+
+    // Invalidate replies cache for this question
+    await invalidateRepliesForQuestion(req.params.id);
+    await invalidateQuestionsCache();
+
     const userInfo = await getUserInfo(req.body.userId);
-
-    const cacheKey = `replies${req.params.id}`;
-    console.log(cacheKey);
-    await redisClient.del(cacheKey);
-
     res.status(201).json({ ...reply.toObject(), userInfo });
   } catch (error) {
     console.error(error);
@@ -93,10 +117,17 @@ const createReply = async (req, res) => {
   }
 };
 
+// Get paginated replies with caching
 const getReplies = async (req, res) => {
   const { page = 1, limit = 5 } = req.query;
+  const cacheKey = `replies:questionId=${req.params.id}:page=${page}:limit=${limit}`;
 
   try {
+    const cachedReplies = await redisClient.get(cacheKey);
+    if (cachedReplies) {
+      return res.json(JSON.parse(cachedReplies));
+    }
+
     const replies = await Reply.find({ questionId: req.params.id })
       .sort({ timeStamp: -1 })
       .skip((page - 1) * limit)
@@ -105,17 +136,12 @@ const getReplies = async (req, res) => {
     const enrichedReplies = await Promise.all(
       replies.map(async (reply) => {
         const userInfo = await getUserInfo(reply.userId);
-        return {
-          ...reply.toObject(),
-          userInfo,
-        };
+        return { ...reply.toObject(), userInfo };
       })
     );
 
-    const cacheKey = `replies${req.params.id}`;
-    console.log(cacheKey);
+    // Cache the replies
     await redisClient.setEx(cacheKey, 3600, JSON.stringify(enrichedReplies));
-
     res.json(enrichedReplies);
   } catch (error) {
     console.error(error);
@@ -123,29 +149,45 @@ const getReplies = async (req, res) => {
   }
 };
 
+// Upvote or downvote a question
 const upVoteQuestion = async (req, res) => {
   try {
     const { id } = req.params;
-    const { action } = req.body;
+    const { action, userId } = req.body;
 
     if (!["inc", "dec"].includes(action)) {
       return res.status(400).json({ error: "Invalid action" });
     }
 
-    const incrementValue = action === "inc" ? 1 : -1;
-
-    const question = await Question.findByIdAndUpdate(
-      id,
-      { $inc: { upvotes: incrementValue } },
-      { new: true }
-    );
-
+    const question = await Question.findById(id);
     if (!question) {
       return res.status(404).json({ error: "Question not found" });
     }
 
-    // Invalidate the cache for questions after upvoting
-    await redisClient.del("questions");
+    const alreadyLiked = question.likedBy.includes(userId);
+
+    if (action === "inc") {
+      if (alreadyLiked) {
+        return res
+          .status(400)
+          .json({ error: "You have already liked this question" });
+      }
+      question.likedBy.push(userId);
+      question.upvotes += 1;
+    } else if (action === "dec") {
+      if (!alreadyLiked) {
+        return res
+          .status(400)
+          .json({ error: "You have not liked this question yet" });
+      }
+      const index = question.likedBy.indexOf(userId);
+      question.likedBy.splice(index, 1);
+      question.upvotes -= 1;
+    }
+
+    await question.save();
+
+    await invalidateQuestionsCache();
 
     res.json(question);
   } catch (error) {
@@ -154,33 +196,50 @@ const upVoteQuestion = async (req, res) => {
   }
 };
 
+// Upvote or downvote a reply
 const upVoteReplies = async (req, res) => {
   try {
-    const { action } = req.body;
     const { id } = req.params;
+    const { action, userId } = req.body;
 
     if (!["inc", "dec"].includes(action)) {
       return res.status(400).json({ error: "Invalid action" });
     }
-    const incrementValue = action === "inc" ? 1 : -1;
-    const reply = await Reply.findByIdAndUpdate(
-      id,
-      { $inc: { upvotes: incrementValue } },
-      { new: true }
-    );
+
+    const reply = await Reply.findById(id);
     if (!reply) {
       return res.status(404).json({ error: "Reply not found" });
     }
 
-    // After upvoting a reply, invalidate the cache for that question's replies
-    const replyData = await Reply.findById(req.params.id);
-    const cacheKey = `replies${replyData.questionId}`;
-    await redisClient.del(cacheKey);
+    const alreadyLiked = reply.likedBy.includes(userId);
+
+    if (action === "inc") {
+      if (alreadyLiked) {
+        return res
+          .status(400)
+          .json({ error: "You have already liked this reply" });
+      }
+      reply.likedBy.push(userId);
+      reply.upvotes += 1;
+    } else if (action === "dec") {
+      if (!alreadyLiked) {
+        return res
+          .status(400)
+          .json({ error: "You have not liked this reply yet" });
+      }
+      const index = reply.likedBy.indexOf(userId);
+      reply.likedBy.splice(index, 1);
+      reply.upvotes -= 1;
+    }
+
+    await reply.save();
+
+    await invalidateRepliesForQuestion(reply.questionId);
 
     res.json(reply);
   } catch (error) {
     console.error(error);
-    res.status(400).json({ error: error.message });
+    res.status(500).json({ error: "Internal server error" });
   }
 };
 
