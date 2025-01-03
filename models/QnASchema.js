@@ -29,6 +29,7 @@ const QuestionSchema = new mongoose.Schema(
       type: Date,
       default: Date.now,
     },
+    likedBy: [{ type: String }],
   },
   { versionKey: false }
 );
@@ -59,6 +60,7 @@ const ReplySchema = new mongoose.Schema(
       type: Date,
       default: Date.now,
     },
+    likedBy: [{ type: String }],
   },
   { versionKey: false }
 );
